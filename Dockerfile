@@ -6,23 +6,15 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy shared requirements first
-RUN pip install --no-cache-dir -r shared-requirements.txt
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir git+https://github.com/CloudSound-MKNZ/cloudsound-shared.git@main
+# Install shared package from git
 RUN pip install --no-cache-dir git+https://github.com/CloudSound-MKNZ/cloudsound-shared.git@main
 
 # Copy service requirements
 COPY requirements.txt .
-RUN pip install --no-cache-dir git+https://github.com/CloudSound-MKNZ/cloudsound-shared.git@main
 RUN pip install --no-cache-dir -r requirements.txt
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir git+https://github.com/CloudSound-MKNZ/cloudsound-shared.git@main
-RUN pip install --no-cache-dir git+https://github.com/CloudSound-MKNZ/cloudsound-shared.git@main
-
-# Copy shared dependencies
 
 # Copy service code
 COPY src /app/src
@@ -31,8 +23,7 @@ COPY src /app/src
 ENV PYTHONPATH=/app
 
 # Expose port
-EXPOSE 8005
+EXPOSE 8000
 
 # Run the application
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8005"]
-
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

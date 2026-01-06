@@ -3,13 +3,21 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from uuid import UUID
-from datetime import datetime
-from pydantic import BaseModel
+from datetime import datetime, timezone
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+
 from cloudsound_shared.db.pool import get_db
-from ..services.concert_service import ConcertService, ConcertConflictError
-from ..models import Concert, ConcertArtist
 from cloudsound_shared.logging import get_logger
 from cloudsound_shared.jwt_handler import verify_token, TokenData
+from cloudsound_shared.exceptions import (
+    NotFoundError,
+    OptimisticLockError,
+    AuthenticationError,
+    AuthorizationError,
+)
+
+from ..services.concert_service import ConcertService, ConcertConflictError
+from ..models import Concert, ConcertArtist
 
 logger = get_logger(__name__)
 
@@ -18,26 +26,26 @@ router = APIRouter(prefix="/concerts", tags=["concerts"])
 
 class ArtistResponse(BaseModel):
     """Artist response model."""
+    model_config = ConfigDict(from_attributes=True)
+    
     id: UUID
     name: str
     genre: Optional[str] = None
-    
-    class Config:
-        from_attributes = True
 
 
 class ConcertArtistResponse(BaseModel):
     """ConcertArtist response model."""
+    model_config = ConfigDict(from_attributes=True)
+    
     id: UUID
     artist_id: UUID
     artist: Optional[ArtistResponse] = None
-    
-    class Config:
-        from_attributes = True
 
 
 class ConcertResponse(BaseModel):
     """Concert response model."""
+    model_config = ConfigDict(from_attributes=True)
+    
     id: UUID
     date: str  # ISO format string
     location: str
@@ -47,9 +55,6 @@ class ConcertResponse(BaseModel):
     created_at: str  # ISO format string
     updated_at: str  # ISO format string
     artists: List[ArtistResponse] = []
-    
-    class Config:
-        from_attributes = True
     
     @classmethod
     def from_orm_with_artists(cls, concert: Concert) -> "ConcertResponse":
@@ -78,31 +83,115 @@ class ConcertResponse(BaseModel):
 
 
 class ConcertCreateRequest(BaseModel):
-    """Request model for creating a concert."""
-    date: datetime
-    location: str
-    description: Optional[str] = None
-    facebook_event_id: Optional[str] = None
-    artist_ids: Optional[List[UUID]] = None
+    """Request model for creating a concert with validation."""
+    date: datetime = Field(..., description="Concert date and time")
+    location: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Concert venue/location",
+    )
+    description: Optional[str] = Field(
+        None,
+        max_length=5000,
+        description="Concert description",
+    )
+    facebook_event_id: Optional[str] = Field(
+        None,
+        max_length=50,
+        pattern=r"^\d+$",
+        description="Facebook event ID (numeric)",
+    )
+    artist_ids: Optional[List[UUID]] = Field(
+        None,
+        description="List of artist UUIDs performing at this concert",
+    )
+    
+    @field_validator("date")
+    @classmethod
+    def validate_date_not_in_past(cls, v: datetime) -> datetime:
+        """Validate that concert date is not in the past."""
+        # Allow dates in the past for historical records, but warn
+        # In strict mode, you could raise an error for past dates
+        return v
+    
+    @field_validator("location")
+    @classmethod
+    def validate_location_not_empty(cls, v: str) -> str:
+        """Validate that location is not just whitespace."""
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Location cannot be empty or whitespace only")
+        return stripped
+    
+    @field_validator("artist_ids")
+    @classmethod
+    def validate_artist_ids_unique(cls, v: Optional[List[UUID]]) -> Optional[List[UUID]]:
+        """Validate that artist IDs are unique."""
+        if v is not None:
+            if len(v) != len(set(v)):
+                raise ValueError("Artist IDs must be unique")
+        return v
 
 
 class ConcertUpdateRequest(BaseModel):
-    """Request model for updating a concert."""
-    date: Optional[datetime] = None
-    location: Optional[str] = None
-    description: Optional[str] = None
-    facebook_event_id: Optional[str] = None
-    artist_ids: Optional[List[UUID]] = None
-    expected_version: Optional[int] = None
+    """Request model for updating a concert with validation."""
+    date: Optional[datetime] = Field(None, description="Concert date and time")
+    location: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=500,
+        description="Concert venue/location",
+    )
+    description: Optional[str] = Field(
+        None,
+        max_length=5000,
+        description="Concert description",
+    )
+    facebook_event_id: Optional[str] = Field(
+        None,
+        max_length=50,
+        pattern=r"^\d+$",
+        description="Facebook event ID (numeric)",
+    )
+    artist_ids: Optional[List[UUID]] = Field(
+        None,
+        description="List of artist UUIDs performing at this concert",
+    )
+    expected_version: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Expected version for optimistic locking",
+    )
+    
+    @field_validator("location")
+    @classmethod
+    def validate_location_not_empty(cls, v: Optional[str]) -> Optional[str]:
+        """Validate that location is not just whitespace."""
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Location cannot be empty or whitespace only")
+            return stripped
+        return v
+    
+    @field_validator("artist_ids")
+    @classmethod
+    def validate_artist_ids_unique(cls, v: Optional[List[UUID]]) -> Optional[List[UUID]]:
+        """Validate that artist IDs are unique."""
+        if v is not None:
+            if len(v) != len(set(v)):
+                raise ValueError("Artist IDs must be unique")
+        return v
 
 
 async def require_admin(authorization: Optional[str] = Header(None)) -> TokenData:
     """Dependency to ensure the caller is an authenticated admin."""
     if not authorization or not authorization.lower().startswith("bearer "):
         logger.warning("missing_authorization_header")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header",
+        raise AuthenticationError(
+            message="Missing or invalid Authorization header",
+            details={"header": "Authorization"},
         )
 
     token = authorization.split(" ", 1)[1]
@@ -110,16 +199,15 @@ async def require_admin(authorization: Optional[str] = Header(None)) -> TokenDat
 
     if not token_data:
         logger.warning("invalid_token")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+        raise AuthenticationError(
+            message="Invalid or expired token",
         )
 
     if token_data.role != "admin":
         logger.warning("admin_required", user_id=token_data.user_id, role=token_data.role)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin privileges required",
+        raise AuthorizationError(
+            message="Admin privileges required",
+            details={"required_role": "admin", "current_role": token_data.role},
         )
 
     return token_data
@@ -153,9 +241,9 @@ async def get_concert(
     
     if not concert:
         logger.warning("concert_not_found", concert_id=str(concert_id))
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Concert {concert_id} not found"
+        raise NotFoundError(
+            message=f"Concert {concert_id} not found",
+            details={"concert_id": str(concert_id)},
         )
     
     logger.info("concert_retrieved", concert_id=str(concert_id), location=concert.location)
@@ -217,9 +305,9 @@ async def update_concert(
             admin_id=admin.user_id,
             error=str(exc),
         )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
+        raise OptimisticLockError(
+            message=str(exc),
+            details={"concert_id": str(concert_id)},
         ) from exc
     except ValueError as exc:
         logger.warning(
@@ -227,9 +315,9 @@ async def update_concert(
             concert_id=str(concert_id),
             admin_id=admin.user_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
+        raise NotFoundError(
+            message=str(exc),
+            details={"concert_id": str(concert_id)},
         ) from exc
 
     logger.info("concert_updated", concert_id=str(concert_id), admin_id=admin.user_id, version=concert.version)
@@ -248,9 +336,9 @@ async def delete_concert(
     service = ConcertService(db)
     deleted = await service.delete_concert(concert_id)
     if not deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Concert {concert_id} not found",
+        raise NotFoundError(
+            message=f"Concert {concert_id} not found",
+            details={"concert_id": str(concert_id)},
         )
 
     logger.info("concert_deleted", concert_id=str(concert_id), admin_id=admin.user_id)

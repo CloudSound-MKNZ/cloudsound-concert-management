@@ -6,7 +6,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
-from cloudsound_shared.db.pool import get_db
+from cloudsound_shared.multitenancy import get_tenant_db
 from cloudsound_shared.logging import get_logger
 from cloudsound_shared.jwt_handler import verify_token, TokenData
 from cloudsound_shared.exceptions import (
@@ -18,6 +18,7 @@ from cloudsound_shared.exceptions import (
 
 from ..services.concert_service import ConcertService, ConcertConflictError
 from ..models import Concert, ConcertArtist
+from ..producers.kafka_producer import get_concert_producer
 
 logger = get_logger(__name__)
 
@@ -216,7 +217,7 @@ async def require_admin(authorization: Optional[str] = Header(None)) -> TokenDat
 @router.get("", response_model=List[ConcertResponse])
 async def list_concerts(
     upcoming_only: bool = Query(False, description="Filter to show only upcoming concerts"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_tenant_db)
 ) -> List[ConcertResponse]:
     """List all concerts, sorted by date (chronological order)."""
     logger.info("listing_concerts", upcoming_only=upcoming_only)
@@ -231,7 +232,7 @@ async def list_concerts(
 @router.get("/{concert_id}", response_model=ConcertResponse)
 async def get_concert(
     concert_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_tenant_db)
 ) -> ConcertResponse:
     """Get a concert by ID."""
     logger.info("getting_concert", concert_id=str(concert_id))
@@ -253,7 +254,7 @@ async def get_concert(
 @router.post("", response_model=ConcertResponse, status_code=status.HTTP_201_CREATED)
 async def create_concert(
     request: ConcertCreateRequest,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     admin: TokenData = Depends(require_admin),
 ) -> ConcertResponse:
     """Create a new concert (admin only)."""
@@ -269,6 +270,33 @@ async def create_concert(
     )
 
     logger.info("concert_created", concert_id=str(concert.id), admin_id=admin.user_id)
+    
+    # Publish concert.created event to Kafka for music discovery
+    try:
+        producer = get_concert_producer()
+        artist_names = [
+            ca.artist.name for ca in concert.concert_artists if ca.artist
+        ]
+        producer.publish_concert_created(
+            concert_id=concert.id,
+            location=concert.location,
+            date=concert.date,
+            description=concert.description,
+            artists=artist_names,
+            facebook_event_id=concert.facebook_event_id,
+        )
+        logger.info(
+            "concert_created_event_published",
+            concert_id=str(concert.id),
+        )
+    except Exception as e:
+        # Log but don't fail the request - music discovery is non-critical
+        logger.warning(
+            "failed_to_publish_concert_created_event",
+            concert_id=str(concert.id),
+            error=str(e),
+        )
+    
     return ConcertResponse.from_orm_with_artists(concert)
 
 
@@ -276,7 +304,7 @@ async def create_concert(
 async def update_concert(
     concert_id: UUID,
     request: ConcertUpdateRequest,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     admin: TokenData = Depends(require_admin),
 ) -> ConcertResponse:
     """Update an existing concert (admin only) with optimistic locking."""
@@ -321,13 +349,40 @@ async def update_concert(
         ) from exc
 
     logger.info("concert_updated", concert_id=str(concert_id), admin_id=admin.user_id, version=concert.version)
+    
+    # Publish concert.updated event to Kafka for music discovery
+    try:
+        producer = get_concert_producer()
+        artist_names = [
+            ca.artist.name for ca in concert.concert_artists if ca.artist
+        ]
+        producer.publish_concert_updated(
+            concert_id=concert.id,
+            location=concert.location,
+            date=concert.date,
+            description=concert.description,
+            artists=artist_names,
+            facebook_event_id=concert.facebook_event_id,
+        )
+        logger.info(
+            "concert_updated_event_published",
+            concert_id=str(concert.id),
+        )
+    except Exception as e:
+        # Log but don't fail the request
+        logger.warning(
+            "failed_to_publish_concert_updated_event",
+            concert_id=str(concert.id),
+            error=str(e),
+        )
+    
     return ConcertResponse.from_orm_with_artists(concert)
 
 
 @router.delete("/{concert_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_concert(
     concert_id: UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     admin: TokenData = Depends(require_admin),
 ) -> None:
     """Delete a concert (admin only)."""

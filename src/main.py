@@ -14,6 +14,7 @@ from cloudsound_shared.config.settings import app_settings
 from .api.concerts import router as concerts_router
 # Import models to ensure they're registered with SQLAlchemy
 from .models import Concert, ConcertArtist
+from .producers.kafka_producer import initialize_producer, shutdown_producer
 
 # Configure logging
 configure_logging(log_level=app_settings.log_level, log_format=app_settings.log_format)
@@ -25,12 +26,22 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager with graceful shutdown."""
     # Startup
     logger.info("concert_management_service_starting", version=app_settings.app_version)
+    
+    # Initialize Kafka producer for event publishing
+    try:
+        initialize_producer()
+        logger.info("kafka_producer_initialized")
+    except Exception as e:
+        logger.warning("kafka_producer_init_failed", error=str(e))
+        # Continue without Kafka - non-critical for basic operations
+    
     logger.info("concert_management_service_started", version=app_settings.app_version)
     
     yield
     
     # Shutdown
     logger.info("concert_management_service_shutting_down")
+    shutdown_producer()
     logger.info("concert_management_service_shutdown")
 
 

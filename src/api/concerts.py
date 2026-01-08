@@ -189,17 +189,25 @@ class ConcertUpdateRequest(BaseModel):
 async def require_admin(authorization: Optional[str] = Header(None)) -> TokenData:
     """Dependency to ensure the caller is an authenticated admin."""
     if not authorization or not authorization.lower().startswith("bearer "):
-        logger.warning("missing_authorization_header")
+        logger.warning(
+            "missing_authorization_header",
+            received_header=authorization[:50] if authorization else None,
+        )
         raise AuthenticationError(
             message="Missing or invalid Authorization header",
             details={"header": "Authorization"},
         )
 
     token = authorization.split(" ", 1)[1]
+    logger.debug("verifying_token", token_prefix=token[:20] if len(token) > 20 else token)
     token_data = verify_token(token)
 
     if not token_data:
-        logger.warning("invalid_token")
+        logger.warning(
+            "invalid_token",
+            token_length=len(token),
+            token_parts=len(token.split(".")),
+        )
         raise AuthenticationError(
             message="Invalid or expired token",
         )

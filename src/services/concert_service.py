@@ -93,12 +93,25 @@ class ConcertService:
         concert = result.scalar_one_or_none()
         
         if concert:
-            # Manually load artists
-            from backend.radio_streaming.src.models.artist import Artist
+            # Manually load artists using raw SQL to avoid cross-service imports
+            from sqlalchemy import text
+            
+            class MinimalArtist:
+                """Minimal artist object for response."""
+                def __init__(self, artist_id, name=None, genre=None):
+                    self.id = artist_id
+                    self.name = name or "Unknown Artist"
+                    self.genre = genre
+            
             for ca in concert.concert_artists:
-                artist_query = select(Artist).where(Artist.id == ca.artist_id)
-                artist_result = await self.db.execute(artist_query)
-                ca.artist = artist_result.scalar_one_or_none()
+                result = await self.db.execute(
+                    text(f"SELECT id, name, genre FROM artists WHERE id = '{ca.artist_id}'")
+                )
+                row = result.fetchone()
+                if row:
+                    ca.artist = MinimalArtist(row[0], row[1], row[2])
+                else:
+                    ca.artist = MinimalArtist(ca.artist_id)
             
             logger.info("retrieved_concert", concert_id=str(concert_id), location=concert.location)
         else:

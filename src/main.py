@@ -1,59 +1,33 @@
 """Concert management service main application."""
-from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
-
+from .api.concerts import router as concerts_router
 from cloudsound_shared.health import router as health_router
 from cloudsound_shared.metrics import get_metrics
-from cloudsound_shared.middleware.error_handler import register_exception_handlers
+from fastapi.responses import Response
+from cloudsound_shared.middleware.error_handler import (
+    http_exception_handler,
+    validation_exception_handler,
+    general_exception_handler,
+)
 from cloudsound_shared.middleware.correlation import CorrelationIDMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exceptions import RequestValidationError
 from cloudsound_shared.logging import configure_logging, get_logger
 from cloudsound_shared.config.settings import app_settings
-
-from .api.concerts import router as concerts_router
 # Import models to ensure they're registered with SQLAlchemy
 from .models import Concert, ConcertArtist
-from .producers.kafka_producer import initialize_producer, shutdown_producer
+import sys
 
 # Configure logging
 configure_logging(log_level=app_settings.log_level, log_format=app_settings.log_format)
 logger = get_logger(__name__)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan manager with graceful shutdown."""
-    # Startup
-    logger.info("concert_management_service_starting", version=app_settings.app_version)
-    
-    # Initialize Kafka producer for event publishing
-    try:
-        initialize_producer()
-        logger.info("kafka_producer_initialized")
-    except Exception as e:
-        logger.warning("kafka_producer_init_failed", error=str(e))
-        # Continue without Kafka - non-critical for basic operations
-    
-    logger.info("concert_management_service_started", version=app_settings.app_version)
-    
-    yield
-    
-    # Shutdown
-    logger.info("concert_management_service_shutting_down")
-    shutdown_producer()
-    logger.info("concert_management_service_shutdown")
-
 
 # Create FastAPI app
 app = FastAPI(
     title="CloudSound Concert Management Service",
     version=app_settings.app_version,
     description="Concert schedule management service",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
-    lifespan=lifespan,
 )
 
 # CORS middleware
@@ -68,19 +42,32 @@ app.add_middleware(
 # Correlation ID middleware
 app.add_middleware(CorrelationIDMiddleware)
 
-# Register all exception handlers
-register_exception_handlers(app)
+# Exception handlers
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, general_exception_handler)
 
 # Include routers
 app.include_router(health_router)
 app.include_router(concerts_router, prefix=app_settings.api_prefix)
-
 
 # Prometheus metrics endpoint
 @app.get("/metrics")
 async def metrics() -> Response:
     """Prometheus metrics endpoint."""
     return Response(content=get_metrics(), media_type="text/plain")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Application startup event."""
+    logger.info("concert_management_service_started", version=app_settings.app_version)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Application shutdown event."""
+    logger.info("concert_management_service_shutdown")
 
 
 if __name__ == "__main__":

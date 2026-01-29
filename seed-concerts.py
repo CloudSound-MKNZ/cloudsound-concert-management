@@ -7,7 +7,7 @@ import os
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from cloudsound_shared.db.pool import AsyncSessionLocal
+from backend.shared.db.pool import AsyncSessionLocal
 from sqlalchemy import text
 from datetime import datetime, timedelta, timezone
 
